@@ -62,6 +62,51 @@ class _EpisodeResult:
     error: str | None = None
 
 
+def _configure_writer(
+    writer: Any, config: ConversionConfig, dataset_info: DatasetInfo
+) -> None:
+    """Apply a conversion config to a writer's format-specific config.
+
+    Shared by the sequential path and the parallel worker so writer options
+    cannot drift between them.
+
+    Args:
+        writer: Writer instance to configure.
+        config: Conversion config supplying the overrides.
+        dataset_info: Dataset info for default values.
+    """
+    # Check if writer has a config attribute (like LeRobotV3Writer)
+    if not hasattr(writer, "config"):
+        return
+
+    wconfig = writer.config
+
+    # Apply defaults from dataset_info
+    if hasattr(wconfig, "fps") and dataset_info.inferred_fps:
+        wconfig.fps = dataset_info.inferred_fps
+
+    if hasattr(wconfig, "robot_type") and dataset_info.inferred_robot_type:
+        wconfig.robot_type = dataset_info.inferred_robot_type
+
+    if hasattr(wconfig, "camera_name_mapping") and config.camera_mapping:
+        wconfig.camera_name_mapping = config.camera_mapping
+
+    # Apply field mappings if writer supports them
+    if hasattr(wconfig, "field_mapping") and config.field_mapping:
+        wconfig.field_mapping = config.field_mapping
+
+    if hasattr(wconfig, "action_field") and config.action_field:
+        wconfig.action_field = config.action_field
+
+    if hasattr(wconfig, "state_field") and config.state_field:
+        wconfig.state_field = config.state_field
+
+    # Apply format-specific config from conversion config
+    for key, value in config.writer_config.items():
+        if hasattr(wconfig, key):
+            setattr(wconfig, key, value)
+
+
 def _process_episode_worker(
     source_path: str,
     output_path: str,
@@ -131,20 +176,7 @@ def _process_episode_worker(
             dataset_info.inferred_robot_type = config.robot_type
 
         # Configure writer
-        if hasattr(writer, "config"):
-            wconfig = writer.config
-            if hasattr(wconfig, "fps") and dataset_info.inferred_fps:
-                wconfig.fps = dataset_info.inferred_fps
-            if hasattr(wconfig, "robot_type") and dataset_info.inferred_robot_type:
-                wconfig.robot_type = dataset_info.inferred_robot_type
-            if hasattr(wconfig, "camera_name_mapping") and config.camera_mapping:
-                wconfig.camera_name_mapping = config.camera_mapping
-            if hasattr(wconfig, "field_mapping") and config.field_mapping:
-                wconfig.field_mapping = config.field_mapping
-            if hasattr(wconfig, "action_field") and config.action_field:
-                wconfig.action_field = config.action_field
-            if hasattr(wconfig, "state_field") and config.state_field:
-                wconfig.state_field = config.state_field
+        _configure_writer(writer, config, dataset_info)
 
         # Read and write the specific episode
         episodes_iter = reader.read_episodes(source)
@@ -291,7 +323,7 @@ class Converter:
         self._apply_config_overrides(dataset_info)
 
         # 5. Configure writer with format-specific options
-        self._configure_writer(writer, dataset_info)
+        _configure_writer(writer, self.config, dataset_info)
 
         # 6. Convert episodes (parallel or sequential)
         total_episodes = dataset_info.num_episodes or 0
@@ -367,42 +399,6 @@ class Converter:
 
         if self.config.robot_type is not None:
             dataset_info.inferred_robot_type = self.config.robot_type
-
-    def _configure_writer(self, writer: Any, dataset_info: DatasetInfo) -> None:
-        """Configure writer with format-specific options.
-
-        Args:
-            writer: Writer instance to configure.
-            dataset_info: Dataset info for default values.
-        """
-        # Check if writer has a config attribute (like LeRobotV3Writer)
-        if hasattr(writer, "config"):
-            config = writer.config
-
-            # Apply defaults from dataset_info
-            if hasattr(config, "fps") and dataset_info.inferred_fps:
-                config.fps = dataset_info.inferred_fps
-
-            if hasattr(config, "robot_type") and dataset_info.inferred_robot_type:
-                config.robot_type = dataset_info.inferred_robot_type
-
-            if hasattr(config, "camera_name_mapping") and self.config.camera_mapping:
-                config.camera_name_mapping = self.config.camera_mapping
-
-            # Apply field mappings if writer supports them
-            if hasattr(config, "field_mapping") and self.config.field_mapping:
-                config.field_mapping = self.config.field_mapping
-
-            if hasattr(config, "action_field") and self.config.action_field:
-                config.action_field = self.config.action_field
-
-            if hasattr(config, "state_field") and self.config.state_field:
-                config.state_field = self.config.state_field
-
-            # Apply format-specific config from conversion config
-            for key, value in self.config.writer_config.items():
-                if hasattr(config, key):
-                    setattr(config, key, value)
 
     def _convert_parallel(
         self,

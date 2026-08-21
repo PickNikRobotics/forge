@@ -40,6 +40,7 @@ rlds = [
 lerobot = [
     "pyarrow>=14.0.0",
     "datasets>=2.16.0",
+    "pillow>=10.0.0",
 ]
 hub = [
     "huggingface_hub>=0.20.0",

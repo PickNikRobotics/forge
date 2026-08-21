@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Image-mode output for the LeRobot v3 writer.**
+  `LeRobotV3WriterConfig(video=False)` PNG-encodes each camera frame inline into
+  the data parquet (`dtype: "image"` features) instead of encoding MP4s — no
+  `videos/` directory and no per-camera `videos/…` pointer columns are written,
+  and `info.json`'s `video_path` / `video_files_size_in_mb` are `null` (the keys
+  stay present, as v3 loaders require). Set it from a conversion config with
+  `writer_config: {video: false}`. Needs Pillow (now part of the `[lerobot]`
+  extra). Video mode stays the default and is unchanged.
+  The LeRobot v3 **reader** decodes these inline PNG columns, so image-mode
+  datasets round-trip through Forge.
+
 - **Streaming reads for cloud datasets (LeRobot-v3, Zarr).** `forge inspect`
   **and `forge ingest`** on `s3://…` / `gs://…` now read over the network with
   **range requests** instead of downloading the whole dataset.
@@ -147,6 +158,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Authentication uses each provider's default credential chain (AWS env
     vars / profiles / IAM roles; GCP Application Default Credentials). Forge
     never handles credentials itself.
+
+### Fixed
+
+- **`writer_config` now reaches parallel conversion workers.** `ConversionConfig`
+  dropped `writer_config` when serialized, so with `--workers > 1` every
+  writer-specific option (including the new `video: false`) was silently ignored
+  by the worker processes.
 
 ### Changed
 
