@@ -86,6 +86,18 @@ def written_v3(tmp_path: Path) -> Path:
     return out
 
 
+@pytest.fixture
+def written_v3_image(tmp_path: Path) -> Path:
+    """Write a 3-episode v3 dataset in image mode (`video=False`)."""
+    out = tmp_path / "synth_v3_image"
+    writer = LeRobotV3Writer(
+        LeRobotV3WriterConfig(fps=30.0, robot_type="synth", video=False)
+    )
+    episodes = (_synth_episode(f"ep_{i:03d}") for i in range(3))
+    writer.write_dataset(episodes, out)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Constants — sourced from upstream lerobot==0.5.1
 # ---------------------------------------------------------------------------
@@ -302,3 +314,37 @@ class TestUpstreamLoader:
         sample = ds[0]
         assert "observation.state" in sample
         assert "action" in sample
+
+
+# ---------------------------------------------------------------------------
+# 6. Image mode (`LeRobotV3WriterConfig(video=False)`) — same gold-standard
+#    check, confirming stock LeRobotDataset reads inline PNG features too.
+# ---------------------------------------------------------------------------
+
+
+class TestUpstreamLoaderImageMode:
+    def test_metadata_loads(self, written_v3_image: Path):
+        from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+        meta = LeRobotDatasetMetadata(
+            repo_id="forge/synth_v3_image",
+            root=written_v3_image,
+        )
+        assert meta.total_episodes == 3
+        assert meta.fps == 30
+        assert "observation.state" in meta.features
+        assert "action" in meta.features
+        assert meta.features["observation.images.top"]["dtype"] == "image"
+
+    def test_dataset_loads_and_iterates(self, written_v3_image: Path):
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+        ds = LeRobotDataset(
+            repo_id="forge/synth_v3_image",
+            root=written_v3_image,
+        )
+        assert len(ds) == 3 * 30
+        sample = ds[0]
+        assert "observation.state" in sample
+        assert "action" in sample
+        assert "observation.images.top" in sample

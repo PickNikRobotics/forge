@@ -21,10 +21,15 @@ Structure:
             │   ├── episode_000000.mp4
             │   └── ...
             └── ...
+
+Image-mode datasets (features with ``dtype: "image"``) have no videos/
+directory: each camera column holds PNG bytes inline in the data parquet,
+decoded lazily per frame.
 """
 
 from __future__ import annotations
 
+import io
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -1144,12 +1149,17 @@ class LeRobotV3Reader:
         # Get camera info from info.json for dimensions
         info_path = dataset_path / "meta" / "info.json"
         camera_features: dict[str, dict] = {}
+        # Image-mode cameras (dtype == "image"): inline PNG bytes live directly
+        # in the data parquet under their full feature key.
+        image_camera_features: dict[str, dict] = {}
         if info_path.exists():
             with open(info_path) as f:
                 info = json.load(f)
                 for key, spec in info.get("features", {}).items():
                     if spec.get("dtype") == "video":
                         camera_features[key] = spec
+                    elif spec.get("dtype") == "image":
+                        image_camera_features[key] = spec
 
         # Get video path template from info.json
         video_path_template = None
@@ -1341,6 +1351,49 @@ class LeRobotV3Reader:
                         height=dims[0],
                         width=dims[1],
                         channels=dims[2],
+                    )
+
+                # Inline image-mode cameras: PNG bytes live in this row's own
+                # struct<bytes, path> column, decoded lazily on load().
+                for image_key, spec in image_camera_features.items():
+                    if image_key not in ep_df.columns:
+                        continue
+                    cam_name = image_key.split(".")[-1]
+                    cell = row[image_key]
+                    png_bytes: bytes | None
+                    png_path: str | None
+                    if isinstance(cell, bytes):
+                        png_bytes, png_path = cell, None
+                    elif isinstance(cell, dict):
+                        png_bytes, png_path = cell.get("bytes"), cell.get("path")
+                    else:
+                        continue
+                    if png_bytes is None:
+                        if not png_path:
+                            continue
+                        resolved = Path(png_path)
+                        if not resolved.is_absolute():
+                            resolved = dataset_path / resolved
+                        if not resolved.exists():
+                            continue
+                        png_path = str(resolved)
+                    shape = spec.get("shape") or [0, 0, 3]
+
+                    def make_image_loader(
+                        data: bytes | None = png_bytes, path: str | None = png_path
+                    ) -> NDArray[Any]:
+                        import numpy as np
+                        from PIL import Image
+
+                        source: Any = io.BytesIO(data) if data is not None else path
+                        with Image.open(source) as img:
+                            return np.array(img)
+
+                    images[cam_name] = LazyImage(
+                        loader=make_image_loader,
+                        height=shape[0],
+                        width=shape[1],
+                        channels=shape[2] if len(shape) > 2 else 3,
                     )
 
                 # Extract state and action

@@ -147,6 +147,16 @@ class TestConversionConfig:
         assert config.robot_type == "franka"
         assert config.fail_on_error is True
 
+    def test_writer_config_round_trips_through_dict(self):
+        """writer_config must survive to_dict/from_dict (used to serialize
+        the config across process boundaries for parallel conversion)."""
+        config = ConversionConfig(
+            target_format="lerobot-v3",
+            writer_config={"video": False},
+        )
+        restored = ConversionConfig.from_dict(config.to_dict())
+        assert restored.writer_config == {"video": False}
+
 
 class TestConversionResult:
     """Tests for ConversionResult."""
@@ -350,3 +360,53 @@ class TestConvertFunction:
 
         assert result.success is True
         assert result.episodes_converted == 3
+
+
+class TestParallelWorkerWriterConfig:
+    """Regression: the parallel conversion path must honor writer_config,
+    same as the sequential path (converter.py's `_process_episode_worker`
+    used to only forward fps/robot_type/camera_mapping/field_mapping, so
+    e.g. `writer_config: {"video": False}` was silently dropped under
+    `--workers > 1`)."""
+
+    @pytest.mark.skipif(
+        not _check_dependencies_available(),
+        reason="PyAV or PyArrow not installed",
+    )
+    def test_worker_applies_writer_config_video_flag(
+        self, tmp_path: Path, mock_dataset: Path, register_mock_reader
+    ):
+        from forge.convert.converter import _process_episode_worker
+
+        output_path = tmp_path / "output"
+        config = ConversionConfig(
+            target_format="lerobot-v3",
+            fps=30.0,
+            writer_config={"video": False},
+        )
+
+        result = _process_episode_worker(
+            str(mock_dataset),
+            str(output_path),
+            0,
+            "mock",
+            "lerobot-v3",
+            config.to_dict(),
+            {"inferred_fps": 30.0, "inferred_robot_type": "mock_robot", "cameras": {}},
+        )
+
+        assert result.success is True
+
+        # Image mode: inline PNG bytes in the parquet, no videos/ directory.
+        assert not (output_path / "videos").exists()
+        parquet_path = output_path / "data" / "chunk-000" / "file-000.parquet"
+        assert parquet_path.exists()
+
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(parquet_path)
+        cam_col = "observation.images.camera0"
+        assert cam_col in table.column_names
+        row = table.to_pylist()[0]
+        assert row[cam_col]["path"] is None
+        assert isinstance(row[cam_col]["bytes"], bytes)

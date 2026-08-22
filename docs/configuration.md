@@ -100,6 +100,18 @@ video:
   compress: true       # Enable compression
 ```
 
+### Writer Settings
+
+Options passed straight to the target format's writer config (unknown keys are
+ignored):
+
+```yaml
+writer_config:
+  video: false         # lerobot-v3: store camera frames as PNG bytes inline in
+                       # the data parquet (dtype "image") instead of MP4 videos.
+                       # Default true. Needs the [lerobot] extra (Pillow).
+```
+
 ### Behavior Settings
 
 ```yaml

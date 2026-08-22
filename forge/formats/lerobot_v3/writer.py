@@ -15,11 +15,16 @@ Writes datasets in LeRobot v3 format (chunked structure):
     └── videos/
         └── observation.images.{camera}/
             └── chunk-000/
-                └── file-000.mp4  # Video data
+                └── file-000.mp4  # Video data (video mode, default)
+
+With ``LeRobotV3WriterConfig(video=False)``, camera frames are PNG-encoded
+inline into the data parquet (as ``dtype: "image"`` features) instead of
+being written as MP4s under videos/ — no videos/ directory is created.
 """
 
 from __future__ import annotations
 
+import io
 import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -44,6 +49,18 @@ def _check_pyarrow() -> None:
         )
 
 
+def _check_pillow() -> None:
+    """Check if Pillow is available (required for image-mode writing)."""
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        raise MissingDependencyError(
+            dependency="pillow",
+            feature="LeRobot v3 image-mode writing (video=False)",
+            install_hint="pip install forge-robotics[lerobot]",
+        )
+
+
 @dataclass
 class LeRobotV3WriterConfig:
     """Configuration for LeRobot v3 writer.
@@ -51,6 +68,10 @@ class LeRobotV3WriterConfig:
     Attributes:
         fps: Frames per second (required).
         robot_type: Robot type identifier (e.g., "franka", "so100").
+        video: If True (default), camera frames are encoded to MP4 (v3
+            "video" dtype features). If False, frames are written as PNG
+            bytes inline in the data parquet (v3 "image" dtype features),
+            matching upstream LeRobot's own ``video=False`` dataset mode.
         video_codec: Video codec for encoding (default: "libx264").
         video_crf: Constant rate factor for video quality (default: 23).
         video_preset: FFmpeg preset for encoding speed (default: "medium").
@@ -65,6 +86,7 @@ class LeRobotV3WriterConfig:
 
     fps: float = 30.0
     robot_type: str = "unknown"
+    video: bool = True
     video_codec: str = "libx264"
     video_crf: int = 23
     video_preset: str = "medium"
@@ -83,7 +105,8 @@ class LeRobotV3Writer:
 
     Converts Episode/Frame data to LeRobot v3 format with:
     - Chunked parquet files for state/action data
-    - MP4 videos for each camera (chunked)
+    - MP4 videos for each camera (chunked), or inline PNG bytes in the data
+      parquet when ``LeRobotV3WriterConfig(video=False)``
     - Parquet metadata files
 
     Example:
@@ -151,6 +174,22 @@ class LeRobotV3Writer:
 
         return f"observation.images.{clean_name}"
 
+    def _encode_image_png(self, image_array: Any) -> bytes:
+        """Encode a frame array to PNG bytes for inline image-mode storage."""
+        import numpy as np
+        from PIL import Image
+
+        if image_array.dtype != np.uint8:
+            if image_array.dtype in (np.float32, np.float64) and image_array.max() <= 1.0:
+                image_array = (image_array * 255).astype(np.uint8)
+            else:
+                image_array = np.clip(image_array, 0, 255).astype(np.uint8)
+
+        img = Image.fromarray(image_array)
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        return buffer.getvalue()
+
     # Features included in stats columns. Image/video features are skipped
     # for now — upstream loaders only require *some* feature to have stats,
     # not all, and pixel-stat computation is expensive.
@@ -171,7 +210,10 @@ class LeRobotV3Writer:
         for feat in self._STAT_FEATURES:
             if feat not in table.column_names:
                 continue
-            arr = np.asarray(table[feat].to_pylist(), dtype=np.float64)
+            values = [v for v in table[feat].to_pylist() if v is not None]
+            if not values:
+                continue
+            arr = np.asarray(values, dtype=np.float64)
             if arr.ndim == 1:
                 arr = arr.reshape(-1, 1)
             out[feat] = {
@@ -265,6 +307,12 @@ class LeRobotV3Writer:
         data_dir.mkdir(parents=True, exist_ok=True)
         data_path = data_dir / f"file-{file_index:03d}.parquet"
 
+        all_keys = list(dict.fromkeys(k for r in self._current_chunk_frames for k in r))
+        for r in self._current_chunk_frames:
+            if len(r) != len(all_keys):
+                for k in all_keys:
+                    r.setdefault(k, None)
+
         try:
             table = pa.Table.from_pylist(self._current_chunk_frames)
             pq.write_table(table, data_path)
@@ -317,6 +365,8 @@ class LeRobotV3Writer:
             ConversionError: If writing fails.
         """
         _check_pyarrow()
+        if not self.config.video:
+            _check_pillow()
 
         if episode_index is None:
             episode_index = len(self._episode_metadata)
@@ -401,17 +451,11 @@ class LeRobotV3Writer:
                         "fps": float(fps),
                     }
 
-            # Collect camera frames for video encoding
-            # Note: Video features are NOT stored in parquet - only in the video files
-            # The mapping is done via the global 'index' column
+            # Collect camera frames. In video mode they are NOT stored in parquet —
+            # only in the video files, mapped via the global 'index' column. In image
+            # mode they are PNG-encoded straight into this row instead.
             for cam_name, lazy_img in frame.images.items():
                 mapped_name = self._map_camera_name(cam_name)
-
-                if mapped_name not in self._current_chunk_videos:
-                    self._current_chunk_videos[mapped_name] = []
-                self._current_chunk_videos[mapped_name].append(lazy_img)
-                if mapped_name not in self._video_keys:
-                    self._video_keys.append(mapped_name)
 
                 # Track camera info
                 if cam_name not in self._cameras:
@@ -420,22 +464,49 @@ class LeRobotV3Writer:
                         height=lazy_img.height,
                         width=lazy_img.width,
                         channels=lazy_img.channels,
+                        storage="mp4" if self.config.video else "image",
                     )
 
-                # Add feature definition (video features go in info.json, not parquet)
-                if mapped_name not in self._features:
-                    self._features[mapped_name] = {
-                        "dtype": "video",
-                        "shape": [lazy_img.height, lazy_img.width, lazy_img.channels],
-                        "names": ["height", "width", "channel"],
-                        "video_info": {
-                            "video.fps": float(fps),
-                            "video.codec": "h264",
-                            "video.pix_fmt": "yuv420p",
-                            "video.is_depth_map": False,
-                            "has_audio": False,
-                        },
-                    }
+                if self.config.video:
+                    if mapped_name not in self._current_chunk_videos:
+                        self._current_chunk_videos[mapped_name] = []
+                    self._current_chunk_videos[mapped_name].append(lazy_img)
+                    if mapped_name not in self._video_keys:
+                        self._video_keys.append(mapped_name)
+
+                    # Add feature definition (video features go in info.json, not parquet)
+                    if mapped_name not in self._features:
+                        self._features[mapped_name] = {
+                            "dtype": "video",
+                            "shape": [lazy_img.height, lazy_img.width, lazy_img.channels],
+                            "names": ["height", "width", "channel"],
+                            "video_info": {
+                                "video.fps": float(fps),
+                                "video.codec": "h264",
+                                "video.pix_fmt": "yuv420p",
+                                "video.is_depth_map": False,
+                                "has_audio": False,
+                            },
+                        }
+                else:
+                    # Image mode: PNG-encode inline into the data row, matching
+                    # the HF `datasets.Image()` struct<bytes, path> storage that
+                    # upstream LeRobot uses for non-video (image) datasets.
+                    image_array = lazy_img.load()
+                    png_bytes = self._encode_image_png(image_array)
+                    lazy_img.clear_cache()
+                    row[mapped_name] = {"bytes": png_bytes, "path": None}
+                    if mapped_name not in self._features:
+                        self._features[mapped_name] = {
+                            "dtype": "image",
+                            "shape": (
+                                list(image_array.shape)
+                                if image_array.ndim == 3
+                                else [*image_array.shape, 1]
+                            ),
+                            "names": ["height", "width", "channel"],
+                            "fps": float(fps),
+                        }
 
             self._current_chunk_frames.append(row)
 
@@ -581,13 +652,31 @@ class LeRobotV3Writer:
         # In parallel mode, infer features from the first data file
         if not self._features or len(self._features) <= 5:  # Only standard features
             first_data_file = output_path / "data" / "chunk-000" / "file-000.parquet"
+            sample_batch = None
             if first_data_file.exists():
-                sample_table = pq.read_table(first_data_file)
-                for col_name in sample_table.column_names:
+                sample_batch = next(
+                    pq.ParquetFile(first_data_file).iter_batches(batch_size=256), None
+                )
+            if sample_batch is not None:
+                for col_name in sample_batch.schema.names:
                     if col_name not in self._features:
-                        col = sample_table.column(col_name)
+                        col = sample_batch.column(col_name)
                         # Infer dtype and shape from data
-                        first_val = col[0].as_py() if len(col) > 0 else None
+                        first_val = next((s.as_py() for s in col if s.is_valid), None)
+                        if isinstance(first_val, dict) and "bytes" in first_val:
+                            # Inline image-mode column (struct<bytes, path>).
+                            from PIL import Image
+
+                            with Image.open(io.BytesIO(first_val["bytes"])) as img:
+                                width, height = img.size
+                                channels = len(img.getbands())
+                            self._features[col_name] = {
+                                "dtype": "image",
+                                "shape": [height, width, channels],
+                                "names": ["height", "width", "channel"],
+                                "fps": float(fps),
+                            }
+                            continue
                         if isinstance(first_val, list):
                             shape = [len(first_val)]
                             dtype = "float32"
@@ -652,9 +741,15 @@ class LeRobotV3Writer:
                 "train": f"0:{total_episodes}",
             },
             "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
-            "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+            "video_path": (
+                "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+                if self.config.video
+                else None
+            ),
             "data_files_size_in_mb": int(self.config.data_files_size_in_mb),
-            "video_files_size_in_mb": int(self.config.video_files_size_in_mb),
+            "video_files_size_in_mb": (
+                int(self.config.video_files_size_in_mb) if self.config.video else None
+            ),
             "features": self._features,
         }
 
@@ -689,8 +784,18 @@ class LeRobotV3Writer:
             data_file = (
                 output_path / "data" / f"chunk-{chunk_idx:03d}" / f"file-{file_idx:03d}.parquet"
             )
-            data_table = pq.read_table(data_file) if data_file.exists() else None
-            length = data_table.num_rows if data_table is not None else 0
+            data_table = None
+            length = 0
+            if data_file.exists():
+                parquet_file = pq.ParquetFile(data_file)
+                length = parquet_file.metadata.num_rows
+                stat_columns = [
+                    name
+                    for name in (*self._STAT_FEATURES, "task_index")
+                    if name in parquet_file.schema_arrow.names
+                ]
+                if stat_columns:
+                    data_table = parquet_file.read(columns=stat_columns)
 
             # Resolve task for this episode.
             if episode_idx < len(self._episode_metadata):
