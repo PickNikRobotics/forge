@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from forge.core.exceptions import ConversionError
 from forge.core.models import CameraInfo, Episode, Frame, LazyImage
 from forge.formats.lerobot_v3.writer import LeRobotV3Writer, LeRobotV3WriterConfig
 
@@ -817,3 +818,51 @@ class TestLeRobotV3WriterSparseColumns:
         assert features[cam_col]["dtype"] == "image"
         assert features[cam_col]["shape"] == [8, 12, 3]
         assert features["observation.state"]["shape"] == [3]
+
+
+JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"]
+
+
+@pytest.mark.skipif(
+    not _check_image_mode_dependencies_available(),
+    reason="PIL or PyArrow not installed",
+)
+class TestLeRobotV3WriterVectorNames:
+    """State and action joint names reach info.json, and every episode must agree on them."""
+
+    def _write(self, tmp_path: Path, episodes: list[Episode]) -> dict:
+        config = LeRobotV3WriterConfig(fps=30.0, robot_type="test_robot", video=False)
+        LeRobotV3Writer(config).write_dataset(iter(episodes), tmp_path / "output")
+        with open(tmp_path / "output" / "meta" / "info.json") as f:
+            return json.load(f)["features"]
+
+    def test_names_are_written(self, tmp_path: Path, sample_episodes: list[Episode]):
+        for episode in sample_episodes:
+            episode.state_names = list(JOINTS)
+            episode.action_names = list(reversed(JOINTS))
+        features = self._write(tmp_path, sample_episodes)
+        assert features["observation.state"]["names"] == JOINTS
+        assert features["action"]["names"] == list(reversed(JOINTS))
+
+    def test_unnamed_episodes_write_null_names(
+        self, tmp_path: Path, sample_episodes: list[Episode]
+    ):
+        features = self._write(tmp_path, sample_episodes)
+        assert features["observation.state"]["names"] is None
+        assert features["action"]["names"] is None
+
+    def test_episodes_that_disagree_on_names_are_refused(
+        self, tmp_path: Path, sample_episodes: list[Episode]
+    ):
+        for episode in sample_episodes:
+            episode.state_names = list(JOINTS)
+        sample_episodes[1].state_names = list(reversed(JOINTS))
+        with pytest.raises(ConversionError, match="episode 'ep_001' lists observation.state names"):
+            self._write(tmp_path, sample_episodes)
+
+    def test_a_named_episode_after_an_unnamed_one_is_refused(
+        self, tmp_path: Path, sample_episodes: list[Episode]
+    ):
+        sample_episodes[1].state_names = list(JOINTS)
+        with pytest.raises(ConversionError, match="earlier episodes list None"):
+            self._write(tmp_path, sample_episodes)

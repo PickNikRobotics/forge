@@ -273,6 +273,8 @@ class Episode:
         cameras: Dictionary mapping camera names to CameraInfo.
         state_dim: Dimensionality of state vector.
         action_dim: Dimensionality of action vector.
+        state_names: Name of each state dimension, in order, when the source names them.
+        action_names: Name of each action dimension, in order, when the source names them.
         fps: Frames per second.
     """
 
@@ -288,6 +290,8 @@ class Episode:
     cameras: dict[str, CameraInfo] = field(default_factory=dict)
     state_dim: int | None = None
     action_dim: int | None = None
+    state_names: list[str] | None = None
+    action_names: list[str] | None = None
     fps: float | None = None
 
     # Frame access - lazy iterator

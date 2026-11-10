@@ -51,6 +51,17 @@ def _read_attr(msg: Any, candidates: tuple[str, ...]) -> Any:
     raise AttributeError(f"none of {candidates} found on {type(msg).__name__}")
 
 
+# ROS2 JointState names its joints in .name, Foxglove proto in .joint_names.
+_JOINT_NAME_FIELDS = ("name", "joint_names")
+
+
+def extract_joint_names(msg: Any, schema_name: str) -> list[str]:
+    """Return the joint names a JointState (ROS2 or proto) lists, or an empty list for any other schema."""
+    if schema_name not in _JOINT_STATE_SCHEMAS:
+        return []
+    return [str(name) for name in _read_attr(msg, _JOINT_NAME_FIELDS)]
+
+
 def extract_joint_field(msg: Any, field: str, dtype: str | None) -> NDArray[Any]:
     """Pull position / velocity / effort from JointState (ROS2 or proto)."""
     candidates = _JOINT_STATE_FIELDS.get(field, (field,))

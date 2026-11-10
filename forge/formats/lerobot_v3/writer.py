@@ -346,6 +346,21 @@ class LeRobotV3Writer:
         self._current_chunk_videos = {}
         self._episodes_in_current_chunk = 0
 
+    def _vector_names(
+        self, episode: Episode, key: str, names: list[str] | None
+    ) -> list[str] | None:
+        """Return the names a state or action feature records. Every episode must agree, since each value is one joint."""
+        names = list(names) if names else None
+        feature = self._features.get(key)
+        if feature is not None and feature["names"] != names:
+            raise ConversionError(
+                "source",
+                "lerobot-v3",
+                f"episode {episode.episode_id!r} lists {key} names {names}, but earlier episodes list "
+                f"{feature['names']}; convert episodes with the same joints into one dataset",
+            )
+        return names
+
     def write_episode(
         self,
         episode: Episode,
@@ -395,6 +410,9 @@ class LeRobotV3Writer:
             self._flush_chunk(output_path)
             self._current_chunk_index = chunk_index
 
+        state_names = self._vector_names(episode, "observation.state", episode.state_names)
+        action_names = self._vector_names(episode, "action", episode.action_names)
+
         # Track video frame index within the chunk's video file
         video_frame_offset = len(self._current_chunk_frames)
 
@@ -420,7 +438,7 @@ class LeRobotV3Writer:
                     self._features["observation.state"] = {
                         "dtype": "float32",
                         "shape": list(frame.state.shape),
-                        "names": None,
+                        "names": state_names,
                         "fps": float(fps),
                     }
 
@@ -431,7 +449,7 @@ class LeRobotV3Writer:
                     self._features["action"] = {
                         "dtype": "float32",
                         "shape": list(frame.action.shape),
-                        "names": None,
+                        "names": action_names,
                         "fps": float(fps),
                     }
 
