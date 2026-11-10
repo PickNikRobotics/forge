@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -17,6 +18,7 @@ import pytest
 pytest.importorskip("mcap")
 
 from forge.formats.mcap import MCAPReader, generate_config  # noqa: E402
+from forge.formats.mcap.decoders import DecodedMessage  # noqa: E402
 from forge.formats.mcap.topic_config import (  # noqa: E402
     EpisodeSplit,
     FieldMapping,
@@ -95,6 +97,11 @@ class TestTrossenWithHandTunedConfig:
         assert isinstance(f.action, np.ndarray)
         assert f.action.shape == (8,)
 
+    def test_proto_joint_states_without_names_give_none(self):
+        ep = next(MCAPReader().read_episodes(TROSSEN, config=_trossen_config()))
+        assert ep.state_names is None
+        assert ep.action_names is None
+
     def test_images_are_lazy(self):
         ep = next(MCAPReader().read_episodes(TROSSEN, config=_trossen_config()))
         f = ep.load_frames()[5]
@@ -140,6 +147,71 @@ class TestSupportedRos2Messages:
         f0 = frames[0]
         assert isinstance(f0.state, np.ndarray)
         assert f0.state.shape == (4,)
+
+    def test_episode_carries_the_joint_state_names(self):
+        ep = next(iter(MCAPReader().read_episodes(ROS2)))
+        assert ep.state_names == ["shoulder_joint", "elbow_joint", "wrist_joint", "gripper_joint"]
+
+
+class TestJointNames:
+    """MCAPReader._infer_joint_names on hand-built JointState streams."""
+
+    @staticmethod
+    def _names(per_message: list[list[str]], dim: int | None = 2) -> list[str] | None:
+        stream = [
+            DecodedMessage(
+                topic="/joint_states",
+                timestamp_ns=i,
+                publish_time_ns=i,
+                schema_name="sensor_msgs/msg/JointState",
+                schema_encoding="ros2msg",
+                message=SimpleNamespace(name=names, position=[0.0] * len(names)),
+            )
+            for i, names in enumerate(per_message)
+        ]
+        config = TopicConfig(
+            source=ROS2,
+            fields={"observation.state": FieldMapping(topic="/joint_states", field="position")},
+        )
+        return MCAPReader._infer_joint_names(
+            {"/joint_states": stream}, config, "observation.state", dim
+        )
+
+    def test_a_non_joint_state_stream_gives_none(self):
+        stream = [
+            DecodedMessage(
+                topic="/command",
+                timestamp_ns=0,
+                publish_time_ns=0,
+                schema_name="std_msgs/msg/Float64MultiArray",
+                schema_encoding="ros2msg",
+                message=SimpleNamespace(data=[0.0, 0.0]),
+            )
+        ]
+        config = TopicConfig(
+            source=ROS2, fields={"action": FieldMapping(topic="/command", field="data")}
+        )
+        assert MCAPReader._infer_joint_names({"/command": stream}, config, "action", 2) is None
+
+    def test_a_field_absent_from_the_config_gives_none(self):
+        config = TopicConfig(source=ROS2, fields={})
+        assert MCAPReader._infer_joint_names({}, config, "action", None) is None
+
+    def test_names_that_change_between_messages_are_refused(self):
+        with pytest.raises(ValueError, match="in one message and"):
+            self._names([["a", "b"], ["b", "a"]])
+
+    def test_a_stream_mixing_named_and_unnamed_messages_is_refused(self):
+        with pytest.raises(ValueError, match="in one message and"):
+            self._names([["a", "b"], []])
+
+    def test_names_that_do_not_match_the_values_are_refused(self):
+        with pytest.raises(ValueError, match="each value needs one unique name"):
+            self._names([["a", "b"]], dim=3)
+
+    def test_duplicate_names_are_refused(self):
+        with pytest.raises(ValueError, match="each value needs one unique name"):
+            self._names([["a", "a"]])
 
 
 # ---------------------------------------------------------------------------
