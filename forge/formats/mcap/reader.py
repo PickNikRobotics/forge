@@ -27,7 +27,7 @@ from forge.core.models import (
 )
 from forge.formats.mcap import episode_split, sync
 from forge.formats.mcap.decoders import DecodedMessage, iter_decoded
-from forge.formats.mcap.extractors import extract
+from forge.formats.mcap.extractors import extract, extract_joint_names
 from forge.formats.mcap.inspect import generate_config, inspect_mcap
 from forge.formats.mcap.topic_config import FieldMapping, TopicConfig
 from forge.formats.mcap.video_decode import decode_packet_stream, looks_like_video_format
@@ -205,6 +205,8 @@ class MCAPReader:
         cameras = self._infer_cameras(secondary_data)
         state_dim = self._infer_dim(secondary_data, "observation.state")
         action_dim = self._infer_dim(secondary_data, "action")
+        state_names = self._infer_joint_names(streams, config, "observation.state", state_dim)
+        action_names = self._infer_joint_names(streams, config, "action", action_dim)
         fps = self._infer_fps(primary_ts_ns)
 
         # ---- Task description (one-shot lookup) ----
@@ -240,6 +242,8 @@ class MCAPReader:
                 cameras=cameras,
                 state_dim=state_dim,
                 action_dim=action_dim,
+                state_names=state_names,
+                action_names=action_names,
                 fps=fps,
                 _frame_loader=_make_loader(),
             )
@@ -499,6 +503,41 @@ class MCAPReader:
         if isinstance(sample, np.ndarray):
             return int(sample.size)
         return None
+
+    @staticmethod
+    def _infer_joint_names(
+        streams: dict[str, list[DecodedMessage]],
+        config: TopicConfig,
+        field_name: str,
+        dim: int | None,
+    ) -> list[str] | None:
+        """Return the joint names every message of a JointState field lists, or None when none list any.
+
+        Values are read by index, so a stream whose names change between messages is refused.
+        """
+        mapping = config.fields.get(field_name)
+        if mapping is None:
+            return None
+        topic = mapping.topic
+        distinct = {
+            tuple(extract_joint_names(m.message, m.schema_name)) for m in streams.get(topic, [])
+        }
+        if distinct <= {()}:
+            return None
+        if len(distinct) > 1:
+            first, second = sorted(distinct)[:2]
+            raise ValueError(
+                f"{topic!r} lists joint names {list(first)} in one message and {list(second)} in "
+                f"another; {field_name} values are read by index, so record the topic with a fixed "
+                "joint list"
+            )
+        names = list(distinct.pop())
+        if len(names) != dim or len(set(names)) != len(names):
+            raise ValueError(
+                f"{topic!r} lists {len(names)} joint names {names} for {dim} {field_name} values; "
+                "each value needs one unique name"
+            )
+        return names
 
     def _infer_fps(self, primary_ts_ns: list[int]) -> float | None:
         if len(primary_ts_ns) < 2:
