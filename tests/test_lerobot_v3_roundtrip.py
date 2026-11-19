@@ -157,6 +157,10 @@ class TestLeRobotV3RoundTrip:
             assert image.shape == (32, 32, 3)
             # _make_episode paints frame N with value (N * 10) % 256; frame 3 -> 30.
             assert float(image.mean()) == pytest.approx(30.0, abs=1.0)
+            # Declared cameras drive video quality analysis, so inline image
+            # cameras must be declared alongside MP4 ones.
+            camera = episode.cameras["camera0"]
+            assert (camera.height, camera.width, camera.storage) == (32, 32, "image")
 
     @pytest.mark.skipif(
         not _check_dependencies_available(),
