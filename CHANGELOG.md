@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Quality scorer is now `q-v2-proprio`. Gripper channels and physical action limits are explicit. Invalid or unsupported motion remains unscored.
+- Video results use `video-v2-integrity` and retain per-camera events, coverage, and provenance. Video checks remain separate from the proprioception score.
+- `video_min_sharpness` is the minimum sampled sharpness. `--video-max-frames` caps decode attempts per camera. Recalibrate filters that depend on these values.
+
+### Fixed
+
+- LeRobot v3 episodes retain metadata FPS and declared cameras. Missing requested video frames raise errors instead of returning substitute images.
+- Missing observations keep their frame alignment. Temporal video checks reset across gaps and decode errors.
+- LeRobot v3 episodes declare image-mode cameras as well as MP4 cameras, so `forge quality --video` checks image-mode datasets.
+
 ### Added
 
 - **Image-mode output for the LeRobot v3 writer.**
@@ -19,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extra). Video mode stays the default and is unchanged.
   The LeRobot v3 **reader** decodes these inline PNG columns, so image-mode
   datasets round-trip through Forge.
+- Localized quality events for held commands, motion pauses, reversals, and opt-in position-tracking stalls.
+- `forge quality --visualize` with event timelines, camera filters, and click-to-seek playback.
+- Camera coverage, decode failures, and timestamp-based frame-drop estimates in video reports.
+- A web viewer with episode search, camera focus, playback controls, and all-channel plots.
+- A reproducible CPU video benchmark.
 
 - **Streaming reads for cloud datasets (LeRobot-v3, Zarr).** `forge inspect`
   **and `forge ingest`** on `s3://…` / `gs://…` now read over the network with
